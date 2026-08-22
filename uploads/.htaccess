@@ -1,0 +1,3 @@
+# Uploads are served only through bmg.php (?action=download|stream), which
+# gates every request on the admin role. Block direct hits from Apache.
+Require all denied
