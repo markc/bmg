@@ -6,6 +6,8 @@ lists, previews, downloads, renames and deletes.
 Everything — router, JSON API, HTML, CSS and JavaScript — lives in one
 `bmg.php`. No composer, no build step, no database, no dependencies.
 
+![Be My Guest landing page](uploads/screenshot.webp)
+
 ## Requirements
 
 **PHP 8.5 or newer.** The code uses the pipe operator (`|>`), `#[\NoDiscard]`,
