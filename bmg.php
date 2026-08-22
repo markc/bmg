@@ -303,6 +303,11 @@ final class Api
     // the built-in server, and <video> seeking needs 206 partial responses.
     private function send(string $path, bool $inline): never
     {
+        // Release the session lock first: PHP holds it for the whole request,
+        // and a stream stays open for minutes — every other request from the
+        // same browser (the next Range, ?action=list) would queue behind it.
+        session_write_close();
+
         $size = filesize($path);
         [$start, $end] = [0, $size - 1];
 

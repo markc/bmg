@@ -56,6 +56,10 @@ Anything below 8.5 will not parse. `php -l bmg.php` after every edit.
   (upload/rename). Lookups go through `path()`, which only does `basename()`.
   Re-sanitising on lookup would 404 files dropped into `uploads/` by hand with
   spaces or quotes in the name.
+- **`send()` must `session_write_close()` before streaming.** PHP holds the
+  session lock for the whole request, so an open stream blocked every other
+  request from the same browser — the next Range, the file list — and video
+  stuttered. Measured: 3.5 s vs 7 ms for a status call behind an open stream.
 - **`send()` must flush the output buffers** before streaming. `readfile()`
   buffers the whole file under the built-in server, and `<video>` seeking
   needs real 206 partial responses.
