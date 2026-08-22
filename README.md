@@ -133,3 +133,151 @@ Anyone with the guest passphrase can fill your disk.
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
+
+## Media playback guide
+
+BeMyGuest serves files as-is. Whether a video plays — and how smoothly — is
+decided by the browser, not by PHP. This section is what to do when it doesn't.
+
+### Why MKV is the problem child
+
+Browsers have a narrow idea of what they will play:
+
+| Layer | Plays everywhere | Partial | Won't play |
+|-------|------------------|---------|------------|
+| Container | MP4, WebM | MKV (Chromium yes; Firefox only if the codecs are WebM-compatible) | AVI, TS, WMV |
+| Video | H.264 (8-bit 4:2:0), VP9, AV1 | HEVC / H.265 (hardware decode only, if at all) | MPEG-2, VC-1, 10-bit anything |
+| Audio | AAC, MP3, Opus, Vorbis, FLAC | — | AC3, E-AC3, DTS, TrueHD |
+| Subtitles | — | — | Embedded SRT/ASS/PGS are ignored |
+
+Downloaded MKVs almost always hit at least one of these: HEVC video, AC3 or DTS
+audio, or both. The symptoms are not a clean failure — you get a black frame,
+video without sound, or "playback" that stutters as the browser falls back to
+software decoding it was never built for.
+
+Other things that look like server trouble but aren't:
+
+- **Slow start on a big MP4** — the `moov` index is at the end of the file, so
+  the browser has to fetch the tail before it can begin. Fixed by `+faststart`
+  below.
+- **Seeking is sluggish** — same cause, or an MKV written without cues.
+- **Stutter while anything else loads** — the session-lock bug, fixed in
+  `send()`; if you see it, you're running an old copy. And make sure you
+  started with `PHP_CLI_SERVER_WORKERS`.
+
+### Step 1 — find out what you've got
+
+```sh
+ffprobe -v error -show_entries stream=codec_type,codec_name,profile,pix_fmt \
+    -of compact=p=0:nk=1 "file.mkv"
+```
+
+Read the output against the table. `h264 … yuv420p` + `aac` means you only
+need a remux. `hevc`, `yuv420p10le`, `ac3`, `dts` or `eac3` mean a transcode
+of that stream.
+
+### Step 2 — make the universal file
+
+The target that plays in every browser, on every OS, with native seeking:
+**MP4 container, H.264 High profile, 8-bit 4:2:0, AAC stereo, faststart.**
+
+Only convert the streams that need it. Each recipe below keeps everything it
+can; `-c copy` is lossless and takes seconds, encoding takes minutes.
+
+**Remux only** — H.264 + AAC already, wrong box:
+
+```sh
+ffmpeg -i in.mkv -map 0:v:0 -map 0:a:0 -c copy -movflags +faststart out.mp4
+```
+
+**Bad audio, good video** — H.264 with AC3/DTS/E-AC3:
+
+```sh
+ffmpeg -i in.mkv -map 0:v:0 -map 0:a:0 -c:v copy \
+    -c:a aac -b:a 160k -ac 2 -movflags +faststart out.mp4
+```
+
+**HEVC / 10-bit video** — the full transcode:
+
+```sh
+ffmpeg -i in.mkv -map 0:v:0 -map 0:a:0 \
+    -c:v libx264 -preset slow -crf 20 -profile:v high -pix_fmt yuv420p \
+    -c:a aac -b:a 160k -ac 2 -movflags +faststart out.mp4
+```
+
+`-crf 20` is visually transparent for most sources; `18` if you're fussy,
+`23` if space matters more. `-preset slow` trades encode time for size —
+`medium` is fine on a slow box. Drop `-c:a aac …` back to `-c:a copy` if the
+audio is already AAC.
+
+**Already-converted file is fine, just slow to start** — move the index:
+
+```sh
+ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4
+```
+
+### Hardware encoding
+
+A 2-hour 1080p HEVC → H.264 software encode is 20–40 minutes on a decent CPU.
+If you have a GPU, use it:
+
+```sh
+# Intel / AMD (VA-API)
+ffmpeg -vaapi_device /dev/dri/renderD128 -i in.mkv -map 0:v:0 -map 0:a:0 \
+    -vf 'format=nv12,hwupload' -c:v h264_vaapi -qp 22 \
+    -c:a aac -b:a 160k -ac 2 -movflags +faststart out.mp4
+
+# NVIDIA (NVENC)
+ffmpeg -i in.mkv -map 0:v:0 -map 0:a:0 \
+    -c:v h264_nvenc -preset p5 -cq 22 -pix_fmt yuv420p \
+    -c:a aac -b:a 160k -ac 2 -movflags +faststart out.mp4
+```
+
+Quality per bit is a little below `libx264 -preset slow`, speed is 5–10×.
+
+### Subtitles
+
+Browsers ignore subtitles embedded in MP4 or MKV. Either drop them (`-sn`,
+which `-map 0:v:0 -map 0:a:0` already does) or burn them into the picture,
+which forces a video encode:
+
+```sh
+ffmpeg -i in.mkv -map 0:v:0 -map 0:a:0 \
+    -vf "subtitles=in.mkv:si=0" \
+    -c:v libx264 -preset slow -crf 20 -pix_fmt yuv420p \
+    -c:a aac -b:a 160k -ac 2 -movflags +faststart out.mp4
+```
+
+`si=0` is the first subtitle track; count from the `ffprobe` output.
+
+### Batch
+
+Convert every MKV in a directory, leaving the originals:
+
+```sh
+for f in *.mkv; do
+    ffmpeg -n -i "$f" -map 0:v:0 -map 0:a:0 \
+        -c:v libx264 -preset slow -crf 20 -profile:v high -pix_fmt yuv420p \
+        -c:a aac -b:a 160k -ac 2 -movflags +faststart "${f%.mkv}.mp4"
+done
+```
+
+`-n` skips an output that already exists, so the loop is safe to re-run.
+
+### Verify
+
+```sh
+ffprobe -v error -show_entries stream=codec_name,profile,pix_fmt \
+    -of compact=p=0:nk=1 out.mp4
+```
+
+You want `h264|High|yuv420p` and `aac|LC`. Then open it in the lightbox and
+**seek** — that exercises the Range path, which is where the server's part of
+the job lives.
+
+### Audio and images
+
+Audio is far less fussy. FLAC, MP3, M4A/AAC, Opus, Vorbis and WAV all play
+directly; the only wrinkle (libmagic reporting `audio/x-flac`, which Firefox
+rejects) is handled in `Api::mime()`. Images need nothing — PNG, JPEG, GIF,
+WebP and SVG all preview.
